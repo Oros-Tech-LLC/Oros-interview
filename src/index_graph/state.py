@@ -41,15 +41,27 @@ class AgentState(TypedDict):
             "description": "History of previously asked questions and answers as a list of dictionaries."
         }
     )
-    agent_out: Union[AgentAction, AgentFinish, None] = field(
+    generated_question: Union[AgentAction, AgentFinish, None] = field(
         default=None,
         metadata={
             "description": "The output from the agent, which can be an action or a finish signal."
         }
     )
-    intermediate_steps: Annotated[list[tuple[AgentAction, str]], operator.add] = field(
-        default_factory=list,
+    human_answer: str = field(
+        default=None,
         metadata={
-            "description": "A list of intermediate steps taken by the agent, each represented as a tuple of action and description."
+            "description": "Human input which cointains an answer for the question generated"
+        }
+    )
+    answer_evaluation: Union[AgentAction, AgentFinish, None] = field(
+        default=None,
+        metadata={
+            "description": "The output from the agent, which can be an action or a finish signal."
+        }
+    )
+    candidate_evaluation: Union[AgentAction, AgentFinish, None] = field(
+        default=None,
+        metadata={
+            "description": "The output from the agent, which can be an action or a finish signal."
         }
     )
