@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Optional
+from typing import Optional, Union
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langchain_core.tools import tool
@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from shared.state import reduce_docs
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict
 
 class Question(BaseModel):
     topic: str = Field(description="Topic of the questions that has been generated")
@@ -30,7 +32,7 @@ class Question(BaseModel):
 
 class EvaluateAnswers(BaseModel):
     question: str = Field(description="Question for which the evaluation is made")
-    answer: str = Field(description="Question for which the evaluation is made")
+    answer: str = Field(description="Answer for which the evaluation is made(human entered answer)")
     evaluation_summary: str = Field(description="Evaluation summary for the given question and answer that has been generated")
     relevance: int = Field(description="Relevance score of the answer")
     correctness: int = Field(description="Correctness score of the answer")
@@ -39,6 +41,41 @@ class EvaluateAnswers(BaseModel):
     technical_strength: int = Field(description="Technical strength score assessed from the answer")
     communication: int = Field(description="Communication score assessed from the answer")
 
+class CategoryEvaluation(BaseModel):
+    score: int = Field(..., description="Score from 1 (Poor) to 5 (Excellent)")
+    examples: List[str] = Field(..., description="Specific examples supporting the evaluation")
+
+class CandidateEvaluation(BaseModel):
+    overall_assessment: str = Field(..., description="Concise summary of the candidate's suitability for the job role")
+    
+    technical_proficiency: CategoryEvaluation = Field(
+        ..., description="Evaluation of technical knowledge, problem-solving skills, and technical challenge handling (Weight: 25%)"
+    )
+    communication_skills: CategoryEvaluation = Field(
+        ..., description="Evaluation of communication clarity, effectiveness, and ability to explain complex concepts (Weight: 20%)"
+    )
+    cultural_fit: CategoryEvaluation = Field(
+        ..., description="Assessment of alignment with company culture and potential contribution to the team (Weight: 15%)"
+    )
+    leadership_teamwork: CategoryEvaluation = Field(
+        ..., description="Evaluation of leadership potential and ability to collaborate effectively (Weight: 15%)"
+    )
+    adaptability_learning_agility: CategoryEvaluation = Field(
+        ..., description="Assessment of adaptability, learning agility, openness to feedback, and continuous improvement (Weight: 15%)"
+    )
+    relevant_experience: CategoryEvaluation = Field(
+        ..., description="Evaluation of alignment between past experiences and job role requirements (Weight: 10%)"
+    )
+    
+    strengths: List[str] = Field(..., description="3-5 key strengths of the candidate with specific examples")
+    areas_for_improvement: List[str] = Field(..., description="2-3 areas where the candidate could improve or need support")
+    
+    final_recommendation: str = Field(
+        ..., description="Final recommendation: Strongly Recommend Hire, Recommend Hire, Recommend Additional Interview, or Do Not Recommend"
+    )
+    
+    additional_comments: Optional[str] = Field(None, description="Additional insights or observations relevant to the hiring decision")
+    
 load_dotenv()
 
 client = Client()
@@ -48,48 +85,29 @@ model = ChatOpenAI(temperature=0,
                             streaming=True,
                             api_key=os.environ.get("OPENAI_API_KEY")
                             )
-def generate_questions(state: list): 
-    """Generate interview questions using an LLM.
-    Args:
-        state (dict): The input state containing required fields.
-    Returns:
-        dict: A dictionary containing generated questions.
-    """
+def generate_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+    """Generate interview questions using an LLM."""
     try:
-        # Ensure the state contains all required fields
-        required_fields = ["resume", "job_description", "job_title", "company_name"]
-        for field in required_fields:
-            if field not in state:
-                raise ValueError(f"Missing required field: {field}")
-
-        # Assign history as an empty list if it is empty
-        if not state.get("history"):
-            state["history"] = []
-
         document_prompt = client.pull_prompt("interviewer_prompt")
         chain = (document_prompt | model.with_structured_output(Question))
         response = chain.invoke({
-            "resume": state["resume"], 
-            "job_description": state["job_description"],
-            "job_title": state["job_title"],
-            "company_name": state["company_name"],
-            "history": state["history"]
-        }) 
+            "resume": state.resume,
+            "job_description": state.job_description,
+            "job_title": state.job_title,
+            "company_name": state.company_name,
+            "history": state.history
+        })
+
+        if not all(hasattr(response, field) for field in ["topic", "question"]):
+            raise ValueError("Generated question is missing required fields")
+
         return {"generated_question": response}
     except Exception as e:
-        print("Error:", e)
-        return {"generated_question": f"Could not generate questions. Details: {str(e)}"}
-    
-def human_input(state: list) -> Runnable:
-    """
-    Accepts a human response as an argument and appends it to the state.
+        print(f"Error in generate_questions: {e}")
+        return {"error": f"Could not generate questions. Details: {str(e)}"}
 
-    Args:
-        state (list): The current state of the conversation or interaction.
-
-    Returns:
-        Runnable: The updated state after appending the human's input.
-    """
+def human_input(state: AgentState) -> AgentState:
+    """Accepts a human response and updates the state."""
     max_retries = 3
     retries = 0
 
@@ -104,93 +122,64 @@ def human_input(state: list) -> Runnable:
             
             state.human_answer = response
             return state
-        
         except EOFError:
             print("EOFError: Input stream is closed or unavailable.")
-            retry = input()
+            retry = input("Do you want to retry? (y/n): ").lower()
             if retry != 'y':
                 raise ValueError("User chose to exit after encountering an EOFError.")
             retries += 1
 
-    raise ValueError("Maximum retries reached. Unable to get valid input.") 
+    raise ValueError("Maximum retries reached. Unable to get valid input.")
 
-def reset_entries(state: list):
+def reset_entries(state: AgentState) -> AgentState:
     """Resets specific entries in the state."""
-    state["generated_question"] = None
-    state["answer_evaluation"] = None
-    state["human_answer"] = None
+    state.generated_question = None
+    state.answer_evaluation = None
+    state.human_answer = None
+    return state
 
-def evaluate_answers(state: list):
-    """Generate evaluation  questions and get human answers.
-    Args:
-        resume (str): The candidate's resume.
-        job_description (str): The job description for the role.
-        job_title (str): The job title of the role
-        company_name (str): The name of the company
-        history Optional[str]: History of previously asked questions and answers
-    Returns:
-        dict: A dictionary containing the question and human answer.
-    """
+def evaluate_answers(state: AgentState) -> Dict[str, Union[EvaluateAnswers, str]]:
+    """Generate evaluation for the human answer."""
     try:
-        # Assign history as an empty list if it is empty
-        if not state.get("history"):
-            state["history"] = []
-
         document_prompt = client.pull_prompt("interviewer_answer_evaluator_prompt")
         chain = (document_prompt | model.with_structured_output(EvaluateAnswers))
         evaluation_response = chain.invoke({
-                           "resume": state["resume"], 
-                           "job_description": state["job_description"],
-                           "job_title": state["job_title"],
-                           "company_name": state["company_name"],
-                           "question": state["generated_question"],
-                           "answer": state["human_answer"],
-                           "history": state["history"]})
+            "resume": state.resume,
+            "job_description": state.job_description,
+            "job_title": state.job_title,
+            "company_name": state.company_name,
+            "question": state.generated_question.question if isinstance(state.generated_question, Question) else str(state.generated_question),
+            "answer": state.human_answer,
+            "history": state.history
+        })
         
-        state["history"].append(evaluation_response) 
+        state.history.append(evaluation_response.dict())
         return {"answer_evaluation": evaluation_response}
     except Exception as e:
-        print("Error:", e)
+        print(f"Error in evaluate_answers: {e}")
         return {"answer_evaluation": f"Could not process question and answer. Details: {str(e)}"}
-    
-def evaluate_candidate(state: list):
-    """Generate interview questions using an LLM.
-    Args:
-        resume (str): The candidate's resume.
-        job_description (str): The job description for the role.
-        job_title (str): The job title of the role
-        company_name (str): The name of the company
-        history Optional[str]: History of previously asked questions and answers
-    Returns:
-        dict: A dictionary containing generated questions categorized into technical, personal, HR, and logical sections.
-    """
-    try:
-        document_prompt = client.pull_prompt("quiz_from_jd")
-        chain = (document_prompt | model.with_structured_output(Question))
-        response = chain.invoke({"resume_text": state.resume, 
-                           "job_description": state.job_description,
-                           "job_title": state.job_title,
-                           "company_name": state.company_name,
-                           "history": state.history})
-        return response
-    except Exception as e:
-        print("Error:", e)
-        return {"error": f"Could not generate questions. Details: {str(e)}"}
-    
-def count_questions(state: list):
-    """
-    Determines whether to finish.
 
-    Args:
-        state (list): The current graph state
-
-    Returns:
-        str: Next node to call
-    """
-    if len(state["history"]) >= 40:
+def count_questions(state: AgentState) -> str:
+    """Determines whether to finish based on the number of questions asked."""
+    if len(state.history) >= 3:
         return "evaluate_candidate"
     else:
         return "generate_questions"
+    
+def evaluate_candidate(state: AgentState)-> Dict[str, Union[CandidateEvaluation, str]]:
+    """Generate candidate evaluation using an LLM."""
+    try:
+        document_prompt = client.pull_prompt("candidate_evaluation_prompt")
+        chain = (document_prompt | model.with_structured_output(CandidateEvaluation))
+        response = chain.invoke({ "job_description": state.job_description,
+                           "job_role": state.job_title,
+                           "company_name": state.company_name,
+                           "history": state.history})
+        return {"candidate_evaluation": response}
+    except Exception as e:
+        print("Error:", e)
+        return {"candidate_evaluation": f"Could not generate candidate_evaluation. Details: {str(e)}"}
+    
 
 # Define the graph
 builder = StateGraph(AgentState)
