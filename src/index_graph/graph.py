@@ -88,6 +88,8 @@ model = ChatOpenAI(temperature=0,
 def generate_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
     """Generate interview questions using an LLM."""
     try:
+        question_count = len(state.history)
+
         document_prompt = client.pull_prompt("interviewer_prompt")
         chain = (document_prompt | model.with_structured_output(Question))
         response = chain.invoke({
@@ -95,7 +97,8 @@ def generate_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
             "job_description": state.job_description,
             "job_title": state.job_title,
             "company_name": state.company_name,
-            "history": state.history
+            "history": state.history,
+            "question_count": question_count
         })
 
         if not all(hasattr(response, field) for field in ["topic", "question"]):
@@ -161,7 +164,7 @@ def evaluate_answers(state: AgentState) -> Dict[str, Union[EvaluateAnswers, str]
 
 def count_questions(state: AgentState) -> str:
     """Determines whether to finish based on the number of questions asked."""
-    if len(state.history) >= 3:
+    if len(state.history) >= 40:
         return "evaluate_candidate"
     else:
         return "generate_questions"
