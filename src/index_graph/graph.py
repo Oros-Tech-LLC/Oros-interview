@@ -85,7 +85,80 @@ model = ChatOpenAI(temperature=0,
                             streaming=True,
                             api_key=os.environ.get("OPENAI_API_KEY")
                             )
-def generate_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+
+def personal_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+    """Generate interview questions using an LLM."""
+    try:
+        question_count = len(state.history)
+
+        document_prompt = client.pull_prompt("interviewer_prompt")
+        chain = (document_prompt | model.with_structured_output(Question))
+        response = chain.invoke({
+            "resume": state.resume,
+            "job_description": state.job_description,
+            "job_title": state.job_title,
+            "company_name": state.company_name,
+            "history": state.history,
+            "question_count": question_count
+        })
+
+        if not all(hasattr(response, field) for field in ["topic", "question"]):
+            raise ValueError("Generated question is missing required fields")
+
+        return {"generated_question": response}
+    except Exception as e:
+        print(f"Error in generate_questions: {e}")
+        return {"error": f"Could not generate questions. Details: {str(e)}"}
+    
+def critical_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+    """Generate interview questions using an LLM."""
+    try:
+        question_count = len(state.history)
+
+        document_prompt = client.pull_prompt("interviewer_prompt")
+        chain = (document_prompt | model.with_structured_output(Question))
+        response = chain.invoke({
+            "resume": state.resume,
+            "job_description": state.job_description,
+            "job_title": state.job_title,
+            "company_name": state.company_name,
+            "history": state.history,
+            "question_count": question_count
+        })
+
+        if not all(hasattr(response, field) for field in ["topic", "question"]):
+            raise ValueError("Generated question is missing required fields")
+
+        return {"generated_question": response}
+    except Exception as e:
+        print(f"Error in generate_questions: {e}")
+        return {"error": f"Could not generate questions. Details: {str(e)}"}
+
+def technical_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+    """Generate interview questions using an LLM."""
+    try:
+        question_count = len(state.history)
+
+        document_prompt = client.pull_prompt("interviewer_prompt")
+        chain = (document_prompt | model.with_structured_output(Question))
+        response = chain.invoke({
+            "resume": state.resume,
+            "job_description": state.job_description,
+            "job_title": state.job_title,
+            "company_name": state.company_name,
+            "history": state.history,
+            "question_count": question_count
+        })
+
+        if not all(hasattr(response, field) for field in ["topic", "question"]):
+            raise ValueError("Generated question is missing required fields")
+
+        return {"generated_question": response}
+    except Exception as e:
+        print(f"Error in generate_questions: {e}")
+        return {"error": f"Could not generate questions. Details: {str(e)}"}
+    
+def hr_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
     """Generate interview questions using an LLM."""
     try:
         question_count = len(state.history)
@@ -164,7 +237,7 @@ def evaluate_answers(state: AgentState) -> Dict[str, Union[EvaluateAnswers, str]
 
 def count_questions(state: AgentState) -> str:
     """Determines whether to finish based on the number of questions asked."""
-    if len(state.history) >= 40:
+    if len(state.history) >= 20:
         return "evaluate_candidate"
     else:
         return "generate_questions"
@@ -183,20 +256,48 @@ def evaluate_candidate(state: AgentState)-> Dict[str, Union[CandidateEvaluation,
         print("Error:", e)
         return {"candidate_evaluation": f"Could not generate candidate_evaluation. Details: {str(e)}"}
     
-
+def questions_topic_decider(state: AgentState) -> str:
+    """Determines which topic to choose based on the number of questions asked."""
+    if len(state.history) <= 7:
+        return "personal_questions"
+    elif len(state.history) <= 20:
+        return "technical_questions"
+    elif len(state.history) <= 27:
+        return "critical_questions"
+    else:
+        return "hr_questions" 
+    
 # Define the graph
 builder = StateGraph(AgentState)
-builder.add_node("generate_questions", generate_questions)
+builder.add_node("technical_questions", technical_questions)
+builder.add_node("hr_questions", hr_questions)
+builder.add_node("critical_questions", critical_questions)
+builder.add_node("personal_questions", personal_questions)
 builder.add_node("human_input", human_input)
 builder.add_node("evaluate_answers", evaluate_answers)
 builder.add_node("reset_entries", reset_entries)
 builder.add_node("evaluate_candidate", evaluate_candidate)
 
 # Add edges using string identifiers
-builder.add_edge(START, "generate_questions")
-builder.add_edge("generate_questions", "human_input")
+builder.add_conditional_edges(
+    START,
+    questions_topic_decider, 
+    {  
+        "personal_questions": "personal_questions",
+        "technical_questions": "technical_questions",
+        "critical_questions": "critical_questions",
+        "hr_questions": "hr_questions"
+    }
+)
+builder.add_edge("personal_questions", "human_input")
+builder.add_edge("technical_questions", "human_input")
+builder.add_edge("critical_questions", "human_input")
+builder.add_edge("hr_questions", "human_input")
 builder.add_edge("human_input", "evaluate_answers")
-builder.add_edge("reset_entries", "generate_questions")
+builder.add_edge("reset_entries", "personal_questions")
+builder.add_edge("reset_entries", "technical_questions")
+builder.add_edge("reset_entries", "critical_questions")
+builder.add_edge("reset_entries", "hr_questions")
 
 builder.add_conditional_edges(
     "evaluate_answers", 
