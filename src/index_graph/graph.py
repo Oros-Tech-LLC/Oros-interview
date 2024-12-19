@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langchain_core.tools import tool
@@ -23,12 +23,46 @@ from shared.state import reduce_docs
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from pydantic import BaseModel, Field
+from pydantic import ValidationError
 from typing import Optional, List, Dict
 
-class Question(BaseModel):
-    topic: str = Field(description="Topic of the questions that has been generated")
+class BaseQuestion(BaseModel):
+    topic: str = Field(description="Topic of the question that has been generated")
     question: str = Field(description="Interview question for the candidate")
-    answer: str = Field(description="Suggested answer for the question")
+    answer: str = Field(description="Suggested answer or evaluation criteria for the question")
+    complexity: int = Field(description="A number from 1 to 5, where 1 is least complex and 5 is most complex")
+
+class PersonalQuestion(BaseModel):
+    topic: str = Field(description="Topic of the question('Personal')")
+    question: str = Field(description="Personal Interview question for the candidate")
+    answer: str = Field(description="Suggested answer or evaluation criteria for the question")
+    complexity: int = Field(description="A number from 1 to 5, where 1 is least complex and 5 is most complex")
+
+class HRQuestion(BaseModel):
+    topic: str = Field(description="Topic of the question that has been generated")
+    question: str = Field(description="The full text of the HR question")
+    answer: str = Field(description="A suggested model answer or evaluation criteria for the question")
+    complexity: int = Field(description="A number from 1 to 5, where 1 is least complex and 5 is most complex")
+
+class CriticalQuestion(BaseModel):
+    topic: str = Field(description="Topic of the question that has been generated")
+    scenario: str = Field(description="A detailed description of the situation or problem")
+    question: str = Field(description="The specific question or task for the candidate based on the scenario")
+    key_considerations: List[str] = Field(description="A list of important factors the candidate should consider in their response")
+    evaluation_criteria: str = Field(description="Key points or approaches the candidate should demonstrate in their answer")
+    follow_up: Optional[str] = Field(description="An optional follow-up question to probe deeper into the candidate's thinking")
+    complexity: int = Field(description="A number from 1 to 5, where 1 is least complex and 5 is most complex")
+
+class TechnicalQuestion(BaseModel):
+    topic: str = Field(description="Topic of the question that has been generated")
+    question_type: Literal["Theoretical", "Coding Challenge", "System Architecture"] = Field(description="Type of technical question")
+    question: str = Field(description="The full text of the technical question or coding challenge")
+    instructions: str = Field(description="Clear, step-by-step instructions for the candidate")
+    example_input: Optional[str] = Field(description="Sample input for the problem, if applicable")
+    example_output: Optional[str] = Field(description="Expected output for the sample input, if applicable")
+    answer_criteria: str = Field(description="Key points or approach the candidate should demonstrate in their answer or solution")
+    complexity: int = Field(description="A number from 1 to 5, where 1 is least complex and 5 is most complex")
+
 
 class EvaluateAnswers(BaseModel):
     question: str = Field(description="Question for which the evaluation is made")
@@ -86,37 +120,48 @@ model = ChatOpenAI(temperature=0,
                             api_key=os.environ.get("OPENAI_API_KEY")
                             )
 
-def personal_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+def personal_questions(state: AgentState) -> Dict[str, Union[PersonalQuestion, str]]:
     """Generate interview questions using an LLM."""
     try:
-        question_count = len(state.history)
-
-        document_prompt = client.pull_prompt("interviewer_prompt")
-        chain = (document_prompt | model.with_structured_output(Question))
-        response = chain.invoke({
+        # Pull and execute the prompt chain
+        document_prompt = client.pull_prompt("interviewer_personal_question")
+        chain = (document_prompt | model.with_structured_output(PersonalQuestion))
+        
+        # Invoke the chain with context
+        raw_response = chain.invoke({
             "resume": state.resume,
             "job_description": state.job_description,
             "job_title": state.job_title,
             "company_name": state.company_name,
-            "history": state.history,
-            "question_count": question_count
+            "history": state.history
         })
+        
+        # Validate and parse the response into the PersonalQuestion schema
+        if isinstance(raw_response, dict):
+            try:
+                response = PersonalQuestion.parse_obj(raw_response)
+            except ValidationError as ve:
+                raise ValueError(f"Output parsing error: {ve}")
+        else:
+            raise ValueError("LLM output is not in the expected dictionary format.")
 
-        if not all(hasattr(response, field) for field in ["topic", "question"]):
-            raise ValueError("Generated question is missing required fields")
+        # Ensure required fields are populated
+        if not all(getattr(response, field, None) for field in ["topic", "question", "answer", "complexity"]):
+            raise ValueError("Generated question is missing required fields.")
 
-        return {"generated_question": response}
+        return {"generated_question": response.dict()}
+
     except Exception as e:
         print(f"Error in generate_questions: {e}")
-        return {"error": f"Could not generate questions. Details: {str(e)}"}
+        return {"generated_question": raw_response}
     
-def critical_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+def critical_questions(state: AgentState) -> Dict[str, Union[CriticalQuestion, str]]:
     """Generate interview questions using an LLM."""
     try:
         question_count = len(state.history)
 
-        document_prompt = client.pull_prompt("interviewer_prompt")
-        chain = (document_prompt | model.with_structured_output(Question))
+        document_prompt = client.pull_prompt("interviewer_critical_questions")
+        chain = (document_prompt | model.with_structured_output(CriticalQuestion))
         response = chain.invoke({
             "resume": state.resume,
             "job_description": state.job_description,
@@ -132,15 +177,15 @@ def critical_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
         return {"generated_question": response}
     except Exception as e:
         print(f"Error in generate_questions: {e}")
-        return {"error": f"Could not generate questions. Details: {str(e)}"}
+        return {"generated_question": f"Could not generate questions. Details: {str(e)}"}
 
-def technical_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+def technical_questions(state: AgentState) -> Dict[str, Union[TechnicalQuestion, str]]:
     """Generate interview questions using an LLM."""
     try:
         question_count = len(state.history)
 
-        document_prompt = client.pull_prompt("interviewer_prompt")
-        chain = (document_prompt | model.with_structured_output(Question))
+        document_prompt = client.pull_prompt("interviewer_technical_questions")
+        chain = (document_prompt | model.with_structured_output(TechnicalQuestion))
         response = chain.invoke({
             "resume": state.resume,
             "job_description": state.job_description,
@@ -156,15 +201,15 @@ def technical_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
         return {"generated_question": response}
     except Exception as e:
         print(f"Error in generate_questions: {e}")
-        return {"error": f"Could not generate questions. Details: {str(e)}"}
+        return {"generated_question": f"Could not generate questions. Details: {str(e)}"}
     
-def hr_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
+def hr_questions(state: AgentState) -> Dict[str, Union[HRQuestion, str]]:
     """Generate interview questions using an LLM."""
     try:
         question_count = len(state.history)
 
-        document_prompt = client.pull_prompt("interviewer_prompt")
-        chain = (document_prompt | model.with_structured_output(Question))
+        document_prompt = client.pull_prompt("interviewer_hr_questions")
+        chain = (document_prompt | model.with_structured_output(HRQuestion))
         response = chain.invoke({
             "resume": state.resume,
             "job_description": state.job_description,
@@ -180,7 +225,7 @@ def hr_questions(state: AgentState) -> Dict[str, Union[Question, str]]:
         return {"generated_question": response}
     except Exception as e:
         print(f"Error in generate_questions: {e}")
-        return {"error": f"Could not generate questions. Details: {str(e)}"}
+        return {"generated_question": f"Could not generate questions. Details: {str(e)}"}
 
 def human_input(state: AgentState) -> AgentState:
     """Accepts a human response and updates the state."""
@@ -224,7 +269,7 @@ def evaluate_answers(state: AgentState) -> Dict[str, Union[EvaluateAnswers, str]
             "job_description": state.job_description,
             "job_title": state.job_title,
             "company_name": state.company_name,
-            "question": state.generated_question.question if isinstance(state.generated_question, Question) else str(state.generated_question),
+            "question": state.generated_question.question if isinstance(state.generated_question) else str(state.generated_question),
             "answer": state.human_answer,
             "history": state.history
         })
@@ -278,26 +323,24 @@ builder.add_node("evaluate_answers", evaluate_answers)
 builder.add_node("reset_entries", reset_entries)
 builder.add_node("evaluate_candidate", evaluate_candidate)
 
-# Add edges using string identifiers
+
+builder.add_edge(START, "personal_questions")
+builder.add_edge("personal_questions", "human_input")
+builder.add_edge("technical_questions", "human_input")
+builder.add_edge("critical_questions", "human_input")
+builder.add_edge("hr_questions", "human_input")
+builder.add_edge("human_input", "evaluate_answers")
+
 builder.add_conditional_edges(
-    START,
-    questions_topic_decider, 
-    {  
+    "reset_entries",
+    questions_topic_decider,
+    {
         "personal_questions": "personal_questions",
         "technical_questions": "technical_questions",
         "critical_questions": "critical_questions",
         "hr_questions": "hr_questions"
     }
 )
-builder.add_edge("personal_questions", "human_input")
-builder.add_edge("technical_questions", "human_input")
-builder.add_edge("critical_questions", "human_input")
-builder.add_edge("hr_questions", "human_input")
-builder.add_edge("human_input", "evaluate_answers")
-builder.add_edge("reset_entries", "personal_questions")
-builder.add_edge("reset_entries", "technical_questions")
-builder.add_edge("reset_entries", "critical_questions")
-builder.add_edge("reset_entries", "hr_questions")
 
 builder.add_conditional_edges(
     "evaluate_answers", 
