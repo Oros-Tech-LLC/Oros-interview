@@ -120,6 +120,9 @@ model = ChatOpenAI(temperature=0,
                             api_key=os.environ.get("OPENAI_API_KEY")
                             )
 
+from typing import Dict, Union
+from pydantic import ValidationError
+
 def personal_questions(state: AgentState) -> Dict[str, Union[PersonalQuestion, str]]:
     """Generate interview questions using an LLM."""
     try:
@@ -127,7 +130,7 @@ def personal_questions(state: AgentState) -> Dict[str, Union[PersonalQuestion, s
         document_prompt = client.pull_prompt("interviewer_personal_question")
         chain = (document_prompt | model.with_structured_output(PersonalQuestion))
         
-        # Invoke the chain with context
+        # Invoke the chain and get raw response
         raw_response = chain.invoke({
             "resume": state.resume,
             "job_description": state.job_description,
@@ -135,25 +138,28 @@ def personal_questions(state: AgentState) -> Dict[str, Union[PersonalQuestion, s
             "company_name": state.company_name,
             "history": state.history
         })
-        
-        # Validate and parse the response into the PersonalQuestion schema
-        if isinstance(raw_response, dict):
-            try:
-                response = PersonalQuestion.parse_obj(raw_response)
-            except ValidationError as ve:
-                raise ValueError(f"Output parsing error: {ve}")
-        else:
-            raise ValueError("LLM output is not in the expected dictionary format.")
 
-        # Ensure required fields are populated
-        if not all(getattr(response, field, None) for field in ["topic", "question", "answer", "complexity"]):
-            raise ValueError("Generated question is missing required fields.")
+        # Debug raw response
+        print(f"Raw LLM Output: {raw_response}")
+
+        # Validate and parse the response
+        response = PersonalQuestion.parse_obj(raw_response)
+
+        # Ensure all required fields are present and valid
+        required_fields = ["topic", "question", "answer", "complexity"]
+        for field in required_fields:
+            if not getattr(response, field, None):
+                raise ValueError(f"Missing required field: {field}")
 
         return {"generated_question": response.dict()}
 
+    except ValidationError as ve:
+        print(f"Validation Error: {ve}")
+        return {"generated_question": f"Could not generate questions. Details: {ve}"}
     except Exception as e:
-        print(f"Error in generate_questions: {e}")
-        return {"generated_question": raw_response}
+        print(f"Error in personal_questions: {e}")
+        return {"generated_question": f"Could not generate questions. Details: {str(e)}"}
+
     
 def critical_questions(state: AgentState) -> Dict[str, Union[CriticalQuestion, str]]:
     """Generate interview questions using an LLM."""
@@ -269,7 +275,7 @@ def evaluate_answers(state: AgentState) -> Dict[str, Union[EvaluateAnswers, str]
             "job_description": state.job_description,
             "job_title": state.job_title,
             "company_name": state.company_name,
-            "question": state.generated_question.question if isinstance(state.generated_question) else str(state.generated_question),
+            "question": state.generated_question,
             "answer": state.human_answer,
             "history": state.history
         })
